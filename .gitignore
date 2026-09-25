@@ -1,0 +1,47 @@
+# Python virtual environment
+.venv/
+
+# Environment variables / credentials
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Jupyter
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+
+# Generated / local data
+data/raw/*
+data/processed/*
+data/rejected/*
+
+# Keep folder structure in Git
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/rejected/.gitkeep
+
+# Generated reports
+reports/*.csv
+reports/*.xlsx
+reports/*.json
+
+# Logs
+*.log
+logs/
+
+# Testing
+.pytest_cache/
+
+# Database / temporary files
+*.db
+*.sqlite
+*.sqlite3
