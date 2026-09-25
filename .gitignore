@@ -45,3 +45,6 @@ logs/
 *.db
 *.sqlite
 *.sqlite3
+# Generated incoming datasets
+data/incoming/*
+!data/incoming/.gitkeep
