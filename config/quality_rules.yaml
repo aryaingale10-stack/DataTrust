@@ -1,0 +1,348 @@
+# DataTrust Data Quality Rules
+# Central configuration for automated data quality validation.
+
+version: "1.0"
+
+quality_dimensions:
+  - completeness
+  - validity
+  - uniqueness
+  - consistency
+  - referential_integrity
+  - freshness
+
+tables:
+  customers:
+    rules:
+      - rule_id: CUST_001
+        name: customer_region_not_null
+        dimension: completeness
+        column: region
+        rule_type: not_null
+        severity: high
+        description: Customer region must not be missing.
+
+      - rule_id: CUST_002
+        name: customer_email_valid_format
+        dimension: validity
+        column: email
+        rule_type: regex
+        pattern: '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$'
+        severity: high
+        description: Customer email must follow a valid email format.
+
+      - rule_id: CUST_003
+        name: customer_id_unique
+        dimension: uniqueness
+        column: customer_id
+        rule_type: unique
+        severity: critical
+        description: Customer ID must uniquely identify each customer record.
+
+      - rule_id: CUST_004
+        name: customer_state_region_consistency
+        dimension: consistency
+        columns:
+         - state
+         - region
+        rule_type: state_region_match
+        severity: medium
+        description: Customer state must correspond to the correct geographic region.
+
+  products:
+        rules:
+          - rule_id: PROD_001
+            name: product_subcategory_not_null
+            dimension: completeness
+            column: subcategory
+            rule_type: not_null
+            severity: medium
+            description: Product subcategory must not be missing.
+
+          - rule_id: PROD_002
+            name: product_unit_cost_positive
+            dimension: validity
+            column: unit_cost
+            rule_type: greater_than
+            threshold: 0
+            severity: high
+            description: Product unit cost must be greater than zero.
+
+          - rule_id: PROD_003
+            name: product_price_not_below_cost
+            dimension: consistency
+            columns:
+             - unit_price
+             - unit_cost
+            rule_type: column_comparison
+            operator: greater_than_or_equal
+            severity: high
+            description: Product unit price must be greater than or equal to unit cost.
+
+          - rule_id: PROD_004
+            name: product_id_unique
+            dimension: uniqueness
+            column: product_id
+            rule_type: unique
+            severity: critical
+            description: Product ID must uniquely identify each product record.
+
+          - rule_id: PROD_005
+            name: product_category_subcategory_consistency
+            dimension: consistency
+            columns:
+            - category
+            - subcategory
+            rule_type: category_subcategory_match
+            severity: medium
+            description: Product subcategory must belong to the assigned product category.
+
+  orders:
+        rules:
+        - rule_id: ORD_001
+          name: order_customer_id_not_null
+          dimension: completeness
+          column: customer_id
+          rule_type: not_null
+          severity: critical
+          description: Every order must have a customer ID.
+
+        - rule_id: ORD_002
+          name: order_customer_exists
+          dimension: referential_integrity
+          column: customer_id
+          rule_type: foreign_key_exists
+          reference_table: customers
+          reference_column: customer_id
+          severity: critical
+          description: Order customer ID must exist in the customers table.
+
+        - rule_id: ORD_003
+          name: order_date_after_customer_signup
+          dimension: consistency
+          columns:
+           - order_date
+           - customer_id
+          rule_type: cross_table_date_comparison
+          reference_table: customers
+          join_column: customer_id
+          reference_date_column: signup_date
+          operator: greater_than_or_equal
+          severity: high
+          description: Order date must be on or after the customer's signup date.
+        
+        - rule_id: ORD_004
+          name: order_sales_channel_valid
+          dimension: validity
+          column: sales_channel
+          rule_type: allowed_values
+          allowed_values:
+           - Website
+           - Mobile App
+           - Physical Store
+          severity: medium
+          description: Sales channel must be one of the approved NovaRetail channels.
+
+
+        - rule_id: ORD_005
+          name: order_id_unique
+          dimension: uniqueness
+          column: order_id
+          rule_type: unique
+          severity: critical
+          description: Order ID must uniquely identify each order record.
+
+        - rule_id: ORD_006
+          name: order_shipping_region_consistency
+          dimension: consistency
+          columns:
+           - shipping_state
+           - shipping_region
+          rule_type: state_region_match
+          severity: medium
+          description: Shipping state must correspond to the correct shipping region.
+
+  order_items:
+        rules:
+        - rule_id: ITEM_001
+          name: order_item_quantity_positive
+          dimension: validity
+          column: quantity
+          rule_type: greater_than
+          threshold: 0
+          severity: high
+          description: Order item quantity must be greater than zero.
+
+        - rule_id: ITEM_002
+          name: order_item_product_exists
+          dimension: referential_integrity
+          column: product_id
+          rule_type: foreign_key_exists
+          reference_table: products
+          reference_column: product_id
+          severity: critical
+          description: Order item product ID must exist in the products table.
+
+        - rule_id: ITEM_003
+          name: order_item_discount_valid
+          dimension: validity
+          column: discount_pct
+          rule_type: between
+          min_value: 0
+          max_value: 0.30
+          severity: high
+          description: Order item discount percentage must be between 0 and 30 percent.
+
+        - rule_id: ITEM_004
+          name: order_item_price_matches_product
+          dimension: consistency
+          columns:
+           - product_id
+           - unit_price
+          rule_type: cross_table_value_match
+          reference_table: products
+          join_column: product_id
+          source_value_column: unit_price
+          reference_value_column: unit_price
+          severity: high
+          description: Order item unit price must match the corresponding product master price.
+
+        - rule_id: ITEM_005
+          name: order_item_id_unique
+          dimension: uniqueness
+          column: order_item_id
+          rule_type: unique
+          severity: critical
+          description: Order item ID must uniquely identify each order item record.
+
+  payments:
+    rules:
+        -  rule_id: PAY_001
+           name: payment_order_exists
+           dimension: referential_integrity
+           column: order_id
+           rule_type: foreign_key_exists
+           reference_table: orders
+           reference_column: order_id
+           severity: critical
+           description: Payment order ID must exist in the orders table.
+
+        -  rule_id: PAY_002
+           name: payment_date_after_order_date
+           dimension: consistency
+           columns:
+           - order_id
+           - payment_date
+           rule_type: cross_table_date_comparison
+           reference_table: orders
+           join_column: order_id
+           reference_date_column: order_date
+           operator: greater_than_or_equal
+           severity: high
+           description: Payment date must be on or after the corresponding order date.
+
+        - rule_id: PAY_003
+          name: payment_status_matches_order_status
+          dimension: consistency
+          columns:
+           - order_id
+           - payment_status
+          rule_type: payment_order_status_match
+          reference_table: orders
+          join_column: order_id
+          reference_column: order_status
+          severity: high
+          description: Payment status must be consistent with the corresponding order status.
+
+        - rule_id: PAY_004
+          name: payment_amount_matches_order_total
+          dimension: consistency
+          columns:
+           - order_id
+           - payment_amount
+          rule_type: payment_amount_reconciliation
+          severity: critical
+          description: Payment amount must match the calculated net sales amount for the order.
+
+        - rule_id: PAY_005
+          name: payment_id_unique
+          dimension: uniqueness
+          column: payment_id
+          rule_type: unique
+          severity: critical
+          description: Payment ID must uniquely identify each payment record.
+
+  returns:
+    rules:
+      - rule_id: RET_001
+        name: return_quantity_not_above_purchased
+        dimension: consistency
+        columns:
+          - order_item_id
+          - return_quantity
+        rule_type: return_quantity_check
+        reference_table: order_items
+        join_column: order_item_id
+        severity: high
+        description: Return quantity must not exceed the originally purchased quantity.
+
+      - rule_id: RET_002
+        name: return_refund_amount_valid
+        dimension: consistency
+        columns:
+         - order_item_id
+         - return_quantity
+         - refund_amount
+        rule_type: refund_amount_reconciliation
+        reference_table: order_items
+        join_column: order_item_id
+        severity: critical
+        description: Refund amount must match the returned quantity and original transaction price.
+
+      - rule_id: RET_003
+        name: return_within_30_days
+        dimension: consistency
+        columns:
+          - order_id
+          - return_date
+        rule_type: return_window_check
+        reference_table: orders
+        join_column: order_id
+        max_days: 30
+        severity: high
+        description: Return must occur between 1 and 30 days after the original order date.
+
+      - rule_id: RET_004
+        name: return_reason_valid
+        dimension: validity
+        column: return_reason
+        rule_type: allowed_values
+        allowed_values:
+          - Damaged
+          - Defective
+          - Wrong Item
+          - Not as Described
+          - Changed Mind
+          - Size/Fit Issue
+          - Arrived Late
+        severity: medium
+        description: Return reason must be one of the approved return reason categories.
+
+      - rule_id: RET_005
+        name: return_order_item_exists
+        dimension: referential_integrity
+        column: order_item_id
+        rule_type: foreign_key_exists
+        reference_table: order_items
+        reference_column: order_item_id
+        severity: critical
+        description: Return order item ID must exist in the order items table.
+
+      - rule_id: RET_006
+        name: return_id_unique
+        dimension: uniqueness
+        column: return_id
+        rule_type: unique
+        severity: critical
+        description: Return ID must uniquely identify each return record.
+
