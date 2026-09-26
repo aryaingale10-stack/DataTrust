@@ -19,6 +19,14 @@ if not DATABASE_URL:
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
+PRIMARY_KEY_MAP = {
+    "customers": "customer_id",
+    "products": "product_id",
+    "orders": "order_id",
+    "order_items": "order_item_id",
+    "payments": "payment_id",
+    "returns": "return_id"
+}
 
 # State-to-region reference mapping
 STATE_REGION_MAP = {
@@ -227,6 +235,52 @@ def save_rule_results(run_id, results):
 
     with engine.begin() as connection:
         connection.execute(query, rows)
+
+def save_issue_details(run_id, results):
+    """Save failed record identifiers for quality rule violations."""
+
+    query = text(
+        """
+        INSERT INTO quality.issue_details (
+            run_id,
+            rule_id,
+            table_name,
+            record_identifier,
+            issue_description
+        )
+        VALUES (
+            :run_id,
+            :rule_id,
+            :table_name,
+            :record_identifier,
+            :issue_description
+        );
+        """
+    )
+
+    rows = []
+
+    for result in results:
+        failed_identifiers = result.get(
+            "failed_record_identifiers",
+            []
+        )
+
+        for record_identifier in failed_identifiers:
+            rows.append({
+                "run_id": run_id,
+                "rule_id": result["rule_id"],
+                "table_name": result["table_name"],
+                "record_identifier": record_identifier,
+                "issue_description": result["rule_name"]
+            })
+
+    if not rows:
+        return
+
+    with engine.begin() as connection:
+        connection.execute(query, rows)
+
 def complete_audit_run(run_id, rules_executed, rules_configured):
     """Mark an audit run as successful only when all configured rules executed."""
 
@@ -419,6 +473,26 @@ def save_overall_score(run_id, quality_score):
                 "quality_score": quality_score
             }
         )
+def get_failed_record_identifiers(table_name, where_clause):
+    """Return the record identifiers that satisfy a failure condition."""
+
+    primary_key = PRIMARY_KEY_MAP[table_name]
+
+    query = text(
+        f"""
+        SELECT {primary_key}
+        FROM raw.{table_name}
+        WHERE {where_clause};
+        """
+    )
+
+    with engine.connect() as connection:
+        rows = connection.execute(query).fetchall()
+
+    return [
+        str(row[0]) if row[0] is not None else None
+        for row in rows
+    ]
 
 def execute_not_null_rule(table_name, rule):
     """Execute a not-null quality rule against a raw PostgreSQL table."""
@@ -429,11 +503,13 @@ def execute_not_null_rule(table_name, rule):
         f"SELECT COUNT(*) FROM raw.{table_name};"
     )
 
+    failure_condition = f"{column} IS NULL"
+
     failure_query = text(
         f"""
         SELECT COUNT(*)
         FROM raw.{table_name}
-        WHERE {column} IS NULL;
+        WHERE {failure_condition};
         """
     )
 
@@ -441,12 +517,19 @@ def execute_not_null_rule(table_name, rule):
         total_records = connection.execute(total_query).scalar_one()
         failed_records = connection.execute(failure_query).scalar_one()
 
-    return build_rule_result(
+    result = build_rule_result(
         table_name=table_name,
         rule=rule,
         total_records=total_records,
         failed_records=failed_records
     )
+
+    result["failed_record_identifiers"] = get_failed_record_identifiers(
+        table_name,
+        failure_condition
+    )
+
+    return result
 
 def execute_regex_rule(table_name, rule):
     """Execute a regex validation rule against a raw PostgreSQL table."""
@@ -475,8 +558,19 @@ def execute_regex_rule(table_name, rule):
         """
     )
 
+    failed_identifiers_query = text(
+        f"""
+        SELECT {PRIMARY_KEY_MAP[table_name]}
+        FROM raw.{table_name}
+        WHERE {column} IS NOT NULL
+          AND {column} !~ :pattern;
+        """
+    )
+
     with engine.connect() as connection:
-        total_records = connection.execute(total_query).scalar_one()
+        total_records = connection.execute(
+            total_query
+        ).scalar_one()
 
         evaluated_records = connection.execute(
             evaluated_query
@@ -487,7 +581,12 @@ def execute_regex_rule(table_name, rule):
             {"pattern": pattern}
         ).scalar_one()
 
-    return build_rule_result(
+        failed_identifiers = connection.execute(
+            failed_identifiers_query,
+            {"pattern": pattern}
+        ).scalars().all()
+
+    result = build_rule_result(
         table_name=table_name,
         rule=rule,
         total_records=total_records,
@@ -495,6 +594,12 @@ def execute_regex_rule(table_name, rule):
         evaluated_records=evaluated_records
     )
 
+    result["failed_record_identifiers"] = [
+        str(identifier) if identifier is not None else None
+        for identifier in failed_identifiers
+    ]
+
+    return result
 def execute_unique_rule(table_name, rule):
     """Detect extra duplicate occurrences for a column."""
 
@@ -525,8 +630,27 @@ def execute_unique_rule(table_name, rule):
         """
     )
 
+    failed_identifiers_query = text(
+        f"""
+        SELECT {column}
+        FROM (
+            SELECT
+                {column},
+                ROW_NUMBER() OVER (
+                    PARTITION BY {column}
+                    ORDER BY ctid
+                ) AS duplicate_number
+            FROM raw.{table_name}
+            WHERE {column} IS NOT NULL
+        ) AS ranked_records
+        WHERE duplicate_number > 1;
+        """
+    )
+
     with engine.connect() as connection:
-        total_records = connection.execute(total_query).scalar_one()
+        total_records = connection.execute(
+            total_query
+        ).scalar_one()
 
         evaluated_records = connection.execute(
             evaluated_query
@@ -536,7 +660,11 @@ def execute_unique_rule(table_name, rule):
             failure_query
         ).scalar_one()
 
-    return build_rule_result(
+        failed_identifiers = connection.execute(
+            failed_identifiers_query
+        ).scalars().all()
+
+    result = build_rule_result(
         table_name=table_name,
         rule=rule,
         total_records=total_records,
@@ -544,6 +672,12 @@ def execute_unique_rule(table_name, rule):
         evaluated_records=evaluated_records
     )
 
+    result["failed_record_identifiers"] = [
+        str(identifier) if identifier is not None else None
+        for identifier in failed_identifiers
+    ]
+
+    return result
 def execute_greater_than_rule(table_name, rule):
     """Execute a greater-than validation rule."""
 
@@ -555,12 +689,12 @@ def execute_greater_than_rule(table_name, rule):
     )
 
     evaluated_query = text(
-    f"""
-    SELECT COUNT(*)
-    FROM raw.{table_name}
-    WHERE {column} IS NOT NULL;
-    """
-)
+        f"""
+        SELECT COUNT(*)
+        FROM raw.{table_name}
+        WHERE {column} IS NOT NULL;
+        """
+    )
 
     failure_query = text(
         f"""
@@ -571,21 +705,48 @@ def execute_greater_than_rule(table_name, rule):
         """
     )
 
+    failed_identifiers_query = text(
+        f"""
+        SELECT {PRIMARY_KEY_MAP[table_name]}
+        FROM raw.{table_name}
+        WHERE {column} IS NOT NULL
+          AND {column} <= :threshold;
+        """
+    )
+
     with engine.connect() as connection:
-        total_records = connection.execute(total_query).scalar_one()
-        evaluated_records = connection.execute(evaluated_query).scalar_one()
+        total_records = connection.execute(
+            total_query
+        ).scalar_one()
+
+        evaluated_records = connection.execute(
+            evaluated_query
+        ).scalar_one()
+
         failed_records = connection.execute(
             failure_query,
             {"threshold": threshold}
         ).scalar_one()
 
-    return build_rule_result(
-    table_name=table_name,
-    rule=rule,
-    total_records=total_records,
-    failed_records=failed_records,
-    evaluated_records=evaluated_records
-)
+        failed_identifiers = connection.execute(
+            failed_identifiers_query,
+            {"threshold": threshold}
+        ).scalars().all()
+
+    result = build_rule_result(
+        table_name=table_name,
+        rule=rule,
+        total_records=total_records,
+        failed_records=failed_records,
+        evaluated_records=evaluated_records
+    )
+
+    result["failed_record_identifiers"] = [
+        str(identifier) if identifier is not None else None
+        for identifier in failed_identifiers
+    ]
+
+    return result
 
 def execute_between_rule(table_name, rule):
     """Execute a numeric range validation rule."""
@@ -615,8 +776,24 @@ def execute_between_rule(table_name, rule):
         """
     )
 
+    failed_identifiers_query = text(
+        f"""
+        SELECT {PRIMARY_KEY_MAP[table_name]}
+        FROM raw.{table_name}
+        WHERE {column} IS NOT NULL
+          AND ({column} < :min_value OR {column} > :max_value);
+        """
+    )
+
+    parameters = {
+        "min_value": min_value,
+        "max_value": max_value
+    }
+
     with engine.connect() as connection:
-        total_records = connection.execute(total_query).scalar_one()
+        total_records = connection.execute(
+            total_query
+        ).scalar_one()
 
         evaluated_records = connection.execute(
             evaluated_query
@@ -624,19 +801,29 @@ def execute_between_rule(table_name, rule):
 
         failed_records = connection.execute(
             failure_query,
-            {
-                "min_value": min_value,
-                "max_value": max_value
-            }
+            parameters
         ).scalar_one()
 
-    return build_rule_result(
+        failed_identifiers = connection.execute(
+            failed_identifiers_query,
+            parameters
+        ).scalars().all()
+
+    result = build_rule_result(
         table_name=table_name,
         rule=rule,
         total_records=total_records,
         failed_records=failed_records,
         evaluated_records=evaluated_records
     )
+
+    result["failed_record_identifiers"] = [
+        str(identifier) if identifier is not None else None
+        for identifier in failed_identifiers
+    ]
+
+    return result
+
 
 def execute_allowed_values_rule(table_name, rule):
     """Validate that column values belong to an approved set."""
@@ -670,8 +857,28 @@ def execute_allowed_values_rule(table_name, rule):
         )
     )
 
+    failed_identifiers_query = text(
+        f"""
+        SELECT {PRIMARY_KEY_MAP[table_name]}
+        FROM raw.{table_name}
+        WHERE {column} IS NOT NULL
+          AND {column} NOT IN :allowed_values;
+        """
+    ).bindparams(
+        bindparam(
+            "allowed_values",
+            expanding=True
+        )
+    )
+
+    parameters = {
+        "allowed_values": allowed_values
+    }
+
     with engine.connect() as connection:
-        total_records = connection.execute(total_query).scalar_one()
+        total_records = connection.execute(
+            total_query
+        ).scalar_one()
 
         evaluated_records = connection.execute(
             evaluated_query
@@ -679,10 +886,15 @@ def execute_allowed_values_rule(table_name, rule):
 
         failed_records = connection.execute(
             failure_query,
-            {"allowed_values": allowed_values}
+            parameters
         ).scalar_one()
 
-    return build_rule_result(
+        failed_identifiers = connection.execute(
+            failed_identifiers_query,
+            parameters
+        ).scalars().all()
+
+    result = build_rule_result(
         table_name=table_name,
         rule=rule,
         total_records=total_records,
@@ -690,7 +902,12 @@ def execute_allowed_values_rule(table_name, rule):
         evaluated_records=evaluated_records
     )
 
+    result["failed_record_identifiers"] = [
+        str(identifier) if identifier is not None else None
+        for identifier in failed_identifiers
+    ]
 
+    return result
 
 def execute_foreign_key_rule(table_name, rule):
     """Check whether non-null foreign key values exist in a reference table."""
@@ -698,17 +915,20 @@ def execute_foreign_key_rule(table_name, rule):
     column = rule["column"]
     reference_table = rule["reference_table"]
     reference_column = rule["reference_column"]
+    primary_key = PRIMARY_KEY_MAP[table_name]
 
     total_query = text(
         f"SELECT COUNT(*) FROM raw.{table_name};"
     )
+
     evaluated_query = text(
-      f"""
-      SELECT COUNT(*)
-      FROM raw.{table_name}
-      WHERE {column} IS NOT NULL;
-      """
-)
+        f"""
+        SELECT COUNT(*)
+        FROM raw.{table_name}
+        WHERE {column} IS NOT NULL;
+        """
+    )
+
     failure_query = text(
         f"""
         SELECT COUNT(*)
@@ -722,18 +942,50 @@ def execute_foreign_key_rule(table_name, rule):
         """
     )
 
-    with engine.connect() as connection:
-        total_records = connection.execute(total_query).scalar_one()
-        evaluated_records = connection.execute(evaluated_query).scalar_one()
-        failed_records = connection.execute(failure_query).scalar_one()
+    failed_identifiers_query = text(
+        f"""
+        SELECT source.{primary_key}
+        FROM raw.{table_name} AS source
+        WHERE source.{column} IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM raw.{reference_table} AS reference
+              WHERE reference.{reference_column} = source.{column}
+          );
+        """
+    )
 
-    return build_rule_result(
+    with engine.connect() as connection:
+        total_records = connection.execute(
+            total_query
+        ).scalar_one()
+
+        evaluated_records = connection.execute(
+            evaluated_query
+        ).scalar_one()
+
+        failed_records = connection.execute(
+            failure_query
+        ).scalar_one()
+
+        failed_identifiers = connection.execute(
+            failed_identifiers_query
+        ).scalars().all()
+
+    result = build_rule_result(
         table_name=table_name,
         rule=rule,
         total_records=total_records,
         failed_records=failed_records,
         evaluated_records=evaluated_records
-)
+    )
+
+    result["failed_record_identifiers"] = [
+        str(identifier) if identifier is not None else None
+        for identifier in failed_identifiers
+    ]
+
+    return result
 
 def execute_column_comparison_rule(table_name, rule):
     """Compare two numeric columns within the same table."""
@@ -761,13 +1013,13 @@ def execute_column_comparison_rule(table_name, rule):
     )
 
     evaluated_query = text(
-    f"""
-    SELECT COUNT(*)
-    FROM raw.{table_name}
-    WHERE {left_column} IS NOT NULL
-      AND {right_column} IS NOT NULL;
-    """
-)
+        f"""
+        SELECT COUNT(*)
+        FROM raw.{table_name}
+        WHERE {left_column} IS NOT NULL
+          AND {right_column} IS NOT NULL;
+        """
+    )
 
     failure_query = text(
         f"""
@@ -779,23 +1031,53 @@ def execute_column_comparison_rule(table_name, rule):
         """
     )
 
-    with engine.connect() as connection:
-        total_records = connection.execute(total_query).scalar_one()
-        evaluated_records = connection.execute(evaluated_query).scalar_one()
-        failed_records = connection.execute(failure_query).scalar_one()
+    failed_identifiers_query = text(
+        f"""
+        SELECT {PRIMARY_KEY_MAP[table_name]}
+        FROM raw.{table_name}
+        WHERE {left_column} IS NOT NULL
+          AND {right_column} IS NOT NULL
+          AND NOT ({left_column} {sql_operator} {right_column});
+        """
+    )
 
-    return build_rule_result(
-    table_name=table_name,
-    rule=rule,
-    total_records=total_records,
-    failed_records=failed_records,
-    evaluated_records=evaluated_records
-)
+    with engine.connect() as connection:
+        total_records = connection.execute(
+            total_query
+        ).scalar_one()
+
+        evaluated_records = connection.execute(
+            evaluated_query
+        ).scalar_one()
+
+        failed_records = connection.execute(
+            failure_query
+        ).scalar_one()
+
+        failed_identifiers = connection.execute(
+            failed_identifiers_query
+        ).scalars().all()
+
+    result = build_rule_result(
+        table_name=table_name,
+        rule=rule,
+        total_records=total_records,
+        failed_records=failed_records,
+        evaluated_records=evaluated_records
+    )
+
+    result["failed_record_identifiers"] = [
+        str(identifier) if identifier is not None else None
+        for identifier in failed_identifiers
+    ]
+
+    return result
 
 def execute_state_region_match_rule(table_name, rule):
     """Validate that each state is assigned to the correct region."""
 
     state_column, region_column = rule["columns"]
+    primary_key = PRIMARY_KEY_MAP[table_name]
 
     total_query = text(
         f"SELECT COUNT(*) FROM raw.{table_name};"
@@ -809,17 +1091,22 @@ def execute_state_region_match_rule(table_name, rule):
           AND {region_column} IS NOT NULL
           AND {state_column} IN :valid_states;
         """
-    ).bindparams(bindparam("valid_states", expanding=True))
+    ).bindparams(
+        bindparam("valid_states", expanding=True)
+    )
+
+    failed_records = 0
+    failed_identifiers = []
 
     with engine.connect() as connection:
-        total_records = connection.execute(total_query).scalar_one()
+        total_records = connection.execute(
+            total_query
+        ).scalar_one()
 
         evaluated_records = connection.execute(
             evaluated_query,
             {"valid_states": list(STATE_REGION_MAP.keys())}
         ).scalar_one()
-
-        failed_records = 0
 
         for state, expected_region in STATE_REGION_MAP.items():
             failure_query = text(
@@ -832,17 +1119,35 @@ def execute_state_region_match_rule(table_name, rule):
                 """
             )
 
+            failed_identifiers_query = text(
+                f"""
+                SELECT {primary_key}
+                FROM raw.{table_name}
+                WHERE {state_column} = :state
+                  AND {region_column} IS NOT NULL
+                  AND {region_column} <> :expected_region;
+                """
+            )
+
+            parameters = {
+                "state": state,
+                "expected_region": expected_region
+            }
+
             failures = connection.execute(
                 failure_query,
-                {
-                    "state": state,
-                    "expected_region": expected_region
-                }
+                parameters
             ).scalar_one()
 
-            failed_records += failures
+            identifiers = connection.execute(
+                failed_identifiers_query,
+                parameters
+            ).scalars().all()
 
-    return build_rule_result(
+            failed_records += failures
+            failed_identifiers.extend(identifiers)
+
+    result = build_rule_result(
         table_name=table_name,
         rule=rule,
         total_records=total_records,
@@ -850,20 +1155,26 @@ def execute_state_region_match_rule(table_name, rule):
         evaluated_records=evaluated_records
     )
 
+    result["failed_record_identifiers"] = [
+        str(identifier) if identifier is not None else None
+        for identifier in failed_identifiers
+    ]
 
-
+    return result
 def execute_cross_table_date_comparison_rule(table_name, rule):
     """Compare a source date with a date from a referenced table."""
 
     source_date_column = next(
-    column
-    for column in rule["columns"]
-    if column != rule["join_column"]
-)
+        column
+        for column in rule["columns"]
+        if column != rule["join_column"]
+    )
+
     join_column = rule["join_column"]
     reference_table = rule["reference_table"]
     reference_date_column = rule["reference_date_column"]
     operator = rule["operator"]
+    primary_key = PRIMARY_KEY_MAP[table_name]
 
     operator_map = {
         "greater_than_or_equal": ">=",
@@ -885,19 +1196,20 @@ def execute_cross_table_date_comparison_rule(table_name, rule):
     )
 
     evaluated_query = text(
-    f"""
-    SELECT COUNT(*)
-    FROM raw.{table_name} AS source
-    WHERE source.{join_column} IS NOT NULL
-      AND source.{source_date_column} IS NOT NULL
-      AND EXISTS (
-          SELECT 1
-          FROM raw.{reference_table} AS reference
-          WHERE reference.{join_column} = source.{join_column}
-            AND reference.{reference_date_column} IS NOT NULL
-      );
-    """
-)
+        f"""
+        SELECT COUNT(*)
+        FROM raw.{table_name} AS source
+        WHERE source.{join_column} IS NOT NULL
+          AND source.{source_date_column} IS NOT NULL
+          AND EXISTS (
+              SELECT 1
+              FROM raw.{reference_table} AS reference
+              WHERE reference.{join_column} = source.{join_column}
+                AND reference.{reference_date_column} IS NOT NULL
+          );
+        """
+    )
+
     failure_query = text(
         f"""
         SELECT COUNT(*)
@@ -922,18 +1234,61 @@ def execute_cross_table_date_comparison_rule(table_name, rule):
         """
     )
 
-    with engine.connect() as connection:
-        total_records = connection.execute(total_query).scalar_one()
-        evaluated_records = connection.execute(evaluated_query).scalar_one()
-        failed_records = connection.execute(failure_query).scalar_one()
+    failed_identifiers_query = text(
+        f"""
+        SELECT source.{primary_key}
+        FROM raw.{table_name} AS source
+        WHERE source.{join_column} IS NOT NULL
+          AND source.{source_date_column} IS NOT NULL
+          AND EXISTS (
+              SELECT 1
+              FROM raw.{reference_table} AS reference
+              WHERE reference.{join_column} = source.{join_column}
+                AND reference.{reference_date_column} IS NOT NULL
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM raw.{reference_table} AS reference
+              WHERE reference.{join_column} = source.{join_column}
+                AND reference.{reference_date_column} IS NOT NULL
+                AND source.{source_date_column}
+                    {sql_operator}
+                    reference.{reference_date_column}
+          );
+        """
+    )
 
-    return build_rule_result(
-    table_name=table_name,
-    rule=rule,
-    total_records=total_records,
-    failed_records=failed_records,
-    evaluated_records=evaluated_records
-)
+    with engine.connect() as connection:
+        total_records = connection.execute(
+            total_query
+        ).scalar_one()
+
+        evaluated_records = connection.execute(
+            evaluated_query
+        ).scalar_one()
+
+        failed_records = connection.execute(
+            failure_query
+        ).scalar_one()
+
+        failed_identifiers = connection.execute(
+            failed_identifiers_query
+        ).scalars().all()
+
+    result = build_rule_result(
+        table_name=table_name,
+        rule=rule,
+        total_records=total_records,
+        failed_records=failed_records,
+        evaluated_records=evaluated_records
+    )
+
+    result["failed_record_identifiers"] = [
+        str(identifier) if identifier is not None else None
+        for identifier in failed_identifiers
+    ]
+
+    return result
 
 def execute_cross_table_value_match_rule(table_name, rule):
     """Compare a source value with the corresponding value in a reference table."""
@@ -942,24 +1297,26 @@ def execute_cross_table_value_match_rule(table_name, rule):
     source_value_column = rule["source_value_column"]
     reference_table = rule["reference_table"]
     reference_value_column = rule["reference_value_column"]
+    primary_key = PRIMARY_KEY_MAP[table_name]
 
     total_query = text(
         f"SELECT COUNT(*) FROM raw.{table_name};"
     )
+
     evaluated_query = text(
-    f"""
-    SELECT COUNT(*)
-    FROM raw.{table_name} AS source
-    WHERE source.{join_column} IS NOT NULL
-      AND source.{source_value_column} IS NOT NULL
-      AND EXISTS (
-          SELECT 1
-          FROM raw.{reference_table} AS reference
-          WHERE reference.{join_column} = source.{join_column}
-            AND reference.{reference_value_column} IS NOT NULL
-      );
-    """
-)
+        f"""
+        SELECT COUNT(*)
+        FROM raw.{table_name} AS source
+        WHERE source.{join_column} IS NOT NULL
+          AND source.{source_value_column} IS NOT NULL
+          AND EXISTS (
+              SELECT 1
+              FROM raw.{reference_table} AS reference
+              WHERE reference.{join_column} = source.{join_column}
+                AND reference.{reference_value_column} IS NOT NULL
+          );
+        """
+    )
 
     failure_query = text(
         f"""
@@ -967,14 +1324,34 @@ def execute_cross_table_value_match_rule(table_name, rule):
         FROM raw.{table_name} AS source
         WHERE source.{join_column} IS NOT NULL
           AND source.{source_value_column} IS NOT NULL
-
           AND EXISTS (
               SELECT 1
               FROM raw.{reference_table} AS reference
               WHERE reference.{join_column} = source.{join_column}
                 AND reference.{reference_value_column} IS NOT NULL
           )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM raw.{reference_table} AS reference
+              WHERE reference.{join_column} = source.{join_column}
+                AND reference.{reference_value_column}
+                    = source.{source_value_column}
+          );
+        """
+    )
 
+    failed_identifiers_query = text(
+        f"""
+        SELECT source.{primary_key}
+        FROM raw.{table_name} AS source
+        WHERE source.{join_column} IS NOT NULL
+          AND source.{source_value_column} IS NOT NULL
+          AND EXISTS (
+              SELECT 1
+              FROM raw.{reference_table} AS reference
+              WHERE reference.{join_column} = source.{join_column}
+                AND reference.{reference_value_column} IS NOT NULL
+          )
           AND NOT EXISTS (
               SELECT 1
               FROM raw.{reference_table} AS reference
@@ -986,13 +1363,23 @@ def execute_cross_table_value_match_rule(table_name, rule):
     )
 
     with engine.connect() as connection:
-        total_records = connection.execute(total_query).scalar_one()
-        evaluated_records = connection.execute(evaluated_query).scalar_one()
+        total_records = connection.execute(
+            total_query
+        ).scalar_one()
+
+        evaluated_records = connection.execute(
+            evaluated_query
+        ).scalar_one()
+
         failed_records = connection.execute(
             failure_query
         ).scalar_one()
 
-    return build_rule_result(
+        failed_identifiers = connection.execute(
+            failed_identifiers_query
+        ).scalars().all()
+
+    result = build_rule_result(
         table_name=table_name,
         rule=rule,
         total_records=total_records,
@@ -1000,37 +1387,54 @@ def execute_cross_table_value_match_rule(table_name, rule):
         evaluated_records=evaluated_records
     )
 
+    result["failed_record_identifiers"] = [
+        str(identifier) if identifier is not None else None
+        for identifier in failed_identifiers
+    ]
+
+    return result
 def execute_payment_order_status_match_rule(table_name, rule):
     """Validate payment status against the corresponding order status."""
 
     join_column = rule["join_column"]
     reference_table = rule["reference_table"]
+    primary_key = PRIMARY_KEY_MAP[table_name]
 
     total_query = text(
         f"SELECT COUNT(*) FROM raw.{table_name};"
     )
 
     evaluated_query = text(
-    f"""
-    SELECT COUNT(*)
-    FROM raw.{table_name} AS source
-    WHERE source.{join_column} IS NOT NULL
-      AND source.payment_status IS NOT NULL
-      AND EXISTS (
-          SELECT 1
-          FROM raw.{reference_table} AS reference
-          WHERE reference.{join_column} = source.{join_column}
-            AND reference.order_status IN ('Completed', 'Cancelled', 'Returned')
-      );
-    """
-)
+        f"""
+        SELECT COUNT(*)
+        FROM raw.{table_name} AS source
+        WHERE source.{join_column} IS NOT NULL
+          AND source.payment_status IS NOT NULL
+          AND EXISTS (
+              SELECT 1
+              FROM raw.{reference_table} AS reference
+              WHERE reference.{join_column} = source.{join_column}
+                AND reference.order_status
+                    IN ('Completed', 'Cancelled', 'Returned')
+          );
+        """
+    )
 
     failed_records = 0
+    failed_identifiers = []
 
     with engine.connect() as connection:
-        total_records = connection.execute(total_query).scalar_one()
-        evaluated_records = connection.execute(evaluated_query).scalar_one()
-        for order_status, expected_payment_status in ORDER_PAYMENT_STATUS_MAP.items():
+        total_records = connection.execute(
+            total_query
+        ).scalar_one()
+
+        evaluated_records = connection.execute(
+            evaluated_query
+        ).scalar_one()
+
+        for order_status, expected_payment_status in (
+            ORDER_PAYMENT_STATUS_MAP.items()
+        ):
 
             failure_query = text(
                 f"""
@@ -1038,29 +1442,53 @@ def execute_payment_order_status_match_rule(table_name, rule):
                 FROM raw.{table_name} AS source
                 WHERE source.{join_column} IS NOT NULL
                   AND source.payment_status IS NOT NULL
-
                   AND EXISTS (
                       SELECT 1
                       FROM raw.{reference_table} AS reference
                       WHERE reference.{join_column} = source.{join_column}
                         AND reference.order_status = :order_status
                   )
-
-                  AND source.payment_status <> :expected_payment_status;
+                  AND source.payment_status
+                      <> :expected_payment_status;
                 """
             )
 
+            failed_identifiers_query = text(
+                f"""
+                SELECT source.{primary_key}
+                FROM raw.{table_name} AS source
+                WHERE source.{join_column} IS NOT NULL
+                  AND source.payment_status IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1
+                      FROM raw.{reference_table} AS reference
+                      WHERE reference.{join_column} = source.{join_column}
+                        AND reference.order_status = :order_status
+                  )
+                  AND source.payment_status
+                      <> :expected_payment_status;
+                """
+            )
+
+            parameters = {
+                "order_status": order_status,
+                "expected_payment_status": expected_payment_status
+            }
+
             failures = connection.execute(
                 failure_query,
-                {
-                    "order_status": order_status,
-                    "expected_payment_status": expected_payment_status
-                }
+                parameters
             ).scalar_one()
 
-            failed_records += failures
+            identifiers = connection.execute(
+                failed_identifiers_query,
+                parameters
+            ).scalars().all()
 
-    return build_rule_result(
+            failed_records += failures
+            failed_identifiers.extend(identifiers)
+
+    result = build_rule_result(
         table_name=table_name,
         rule=rule,
         total_records=total_records,
@@ -1068,29 +1496,37 @@ def execute_payment_order_status_match_rule(table_name, rule):
         evaluated_records=evaluated_records
     )
 
+    result["failed_record_identifiers"] = [
+        str(identifier) if identifier is not None else None
+        for identifier in failed_identifiers
+    ]
+
+    return result
 def execute_return_quantity_check_rule(table_name, rule):
     """Validate that returned quantity does not exceed purchased quantity."""
 
     join_column = rule["join_column"]
     reference_table = rule["reference_table"]
+    primary_key = PRIMARY_KEY_MAP[table_name]
 
     total_query = text(
         f"SELECT COUNT(*) FROM raw.{table_name};"
     )
+
     evaluated_query = text(
-    f"""
-    SELECT COUNT(*)
-    FROM raw.{table_name} AS source
-    WHERE source.{join_column} IS NOT NULL
-      AND source.return_quantity IS NOT NULL
-      AND EXISTS (
-          SELECT 1
-          FROM raw.{reference_table} AS reference
-          WHERE reference.{join_column} = source.{join_column}
-            AND reference.quantity IS NOT NULL
-      );
-    """
-)
+        f"""
+        SELECT COUNT(*)
+        FROM raw.{table_name} AS source
+        WHERE source.{join_column} IS NOT NULL
+          AND source.return_quantity IS NOT NULL
+          AND EXISTS (
+              SELECT 1
+              FROM raw.{reference_table} AS reference
+              WHERE reference.{join_column} = source.{join_column}
+                AND reference.quantity IS NOT NULL
+          );
+        """
+    )
 
     failure_query = text(
         f"""
@@ -1098,30 +1534,62 @@ def execute_return_quantity_check_rule(table_name, rule):
         FROM raw.{table_name} AS source
         WHERE source.{join_column} IS NOT NULL
           AND source.return_quantity IS NOT NULL
-
           AND EXISTS (
-             SELECT 1
-             FROM raw.{reference_table} AS reference
-             WHERE reference.{join_column} = source.{join_column}
-             AND reference.quantity IS NOT NULL
-)
-
+              SELECT 1
+              FROM raw.{reference_table} AS reference
+              WHERE reference.{join_column} = source.{join_column}
+                AND reference.quantity IS NOT NULL
+          )
           AND NOT EXISTS (
-             SELECT 1
-             FROM raw.{reference_table} AS reference
-             WHERE reference.{join_column} = source.{join_column}
-             AND reference.quantity IS NOT NULL
-             AND source.return_quantity <= reference.quantity
-)
+              SELECT 1
+              FROM raw.{reference_table} AS reference
+              WHERE reference.{join_column} = source.{join_column}
+                AND reference.quantity IS NOT NULL
+                AND source.return_quantity <= reference.quantity
+          );
+        """
+    )
+
+    failed_identifiers_query = text(
+        f"""
+        SELECT source.{primary_key}
+        FROM raw.{table_name} AS source
+        WHERE source.{join_column} IS NOT NULL
+          AND source.return_quantity IS NOT NULL
+          AND EXISTS (
+              SELECT 1
+              FROM raw.{reference_table} AS reference
+              WHERE reference.{join_column} = source.{join_column}
+                AND reference.quantity IS NOT NULL
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM raw.{reference_table} AS reference
+              WHERE reference.{join_column} = source.{join_column}
+                AND reference.quantity IS NOT NULL
+                AND source.return_quantity <= reference.quantity
+          );
         """
     )
 
     with engine.connect() as connection:
-        total_records = connection.execute(total_query).scalar_one()
-        evaluated_records = connection.execute(evaluated_query).scalar_one()
-        failed_records = connection.execute(failure_query).scalar_one()
+        total_records = connection.execute(
+            total_query
+        ).scalar_one()
 
-    return build_rule_result(
+        evaluated_records = connection.execute(
+            evaluated_query
+        ).scalar_one()
+
+        failed_records = connection.execute(
+            failure_query
+        ).scalar_one()
+
+        failed_identifiers = connection.execute(
+            failed_identifiers_query
+        ).scalars().all()
+
+    result = build_rule_result(
         table_name=table_name,
         rule=rule,
         total_records=total_records,
@@ -1129,79 +1597,138 @@ def execute_return_quantity_check_rule(table_name, rule):
         evaluated_records=evaluated_records
     )
 
+    result["failed_record_identifiers"] = [
+        str(identifier) if identifier is not None else None
+        for identifier in failed_identifiers
+    ]
+
+    return result
+
 def execute_refund_amount_reconciliation_rule(table_name, rule):
     """Validate refund amount against the original order-item transaction."""
 
     join_column = rule["join_column"]
     reference_table = rule["reference_table"]
+    primary_key = PRIMARY_KEY_MAP[table_name]
 
     total_query = text(
         f"SELECT COUNT(*) FROM raw.{table_name};"
     )
+
     evaluated_query = text(
-    f"""
-    SELECT COUNT(*)
-    FROM raw.{table_name} AS source
-    WHERE source.{join_column} IS NOT NULL
-      AND source.return_quantity IS NOT NULL
-      AND source.refund_amount IS NOT NULL
-      AND EXISTS (
-          SELECT 1
-          FROM raw.{reference_table} AS reference
-          WHERE reference.{join_column} = source.{join_column}
-            AND reference.unit_price IS NOT NULL
-            AND reference.discount_pct IS NOT NULL
-      );
-    """
-)
+        f"""
+        SELECT COUNT(*)
+        FROM raw.{table_name} AS source
+        WHERE source.{join_column} IS NOT NULL
+          AND source.return_quantity IS NOT NULL
+          AND source.refund_amount IS NOT NULL
+          AND EXISTS (
+              SELECT 1
+              FROM raw.{reference_table} AS reference
+              WHERE reference.{join_column} = source.{join_column}
+                AND reference.unit_price IS NOT NULL
+                AND reference.discount_pct IS NOT NULL
+          );
+        """
+    )
 
     failure_query = text(
-    f"""
-    SELECT COUNT(*)
-    FROM raw.{table_name} AS source
-    WHERE source.{join_column} IS NOT NULL
-      AND source.return_quantity IS NOT NULL
-      AND source.refund_amount IS NOT NULL
+        f"""
+        SELECT COUNT(*)
+        FROM raw.{table_name} AS source
+        WHERE source.{join_column} IS NOT NULL
+          AND source.return_quantity IS NOT NULL
+          AND source.refund_amount IS NOT NULL
+          AND EXISTS (
+              SELECT 1
+              FROM raw.{reference_table} AS reference
+              WHERE reference.{join_column} = source.{join_column}
+                AND reference.unit_price IS NOT NULL
+                AND reference.discount_pct IS NOT NULL
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM raw.{reference_table} AS reference
+              WHERE reference.{join_column} = source.{join_column}
+                AND reference.unit_price IS NOT NULL
+                AND reference.discount_pct IS NOT NULL
+                AND ABS(
+                    source.refund_amount -
+                    ROUND(
+                        source.return_quantity
+                        * reference.unit_price
+                        * (1 - reference.discount_pct),
+                        2
+                    )
+                ) <= 0.01
+          );
+        """
+    )
 
-      AND EXISTS (
-          SELECT 1
-          FROM raw.{reference_table} AS reference
-          WHERE reference.{join_column} = source.{join_column}
-            AND reference.unit_price IS NOT NULL
-            AND reference.discount_pct IS NOT NULL
-      )
-
-      AND NOT EXISTS (
-          SELECT 1
-          FROM raw.{reference_table} AS reference
-          WHERE reference.{join_column} = source.{join_column}
-            AND reference.unit_price IS NOT NULL
-            AND reference.discount_pct IS NOT NULL
-            AND ABS(
-                source.refund_amount -
-                ROUND(
-                    source.return_quantity
-                    * reference.unit_price
-                    * (1 - reference.discount_pct),
-                    2
-                )
-            ) <= 0.01
-      );
-    """
-)
+    failed_identifiers_query = text(
+        f"""
+        SELECT source.{primary_key}
+        FROM raw.{table_name} AS source
+        WHERE source.{join_column} IS NOT NULL
+          AND source.return_quantity IS NOT NULL
+          AND source.refund_amount IS NOT NULL
+          AND EXISTS (
+              SELECT 1
+              FROM raw.{reference_table} AS reference
+              WHERE reference.{join_column} = source.{join_column}
+                AND reference.unit_price IS NOT NULL
+                AND reference.discount_pct IS NOT NULL
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM raw.{reference_table} AS reference
+              WHERE reference.{join_column} = source.{join_column}
+                AND reference.unit_price IS NOT NULL
+                AND reference.discount_pct IS NOT NULL
+                AND ABS(
+                    source.refund_amount -
+                    ROUND(
+                        source.return_quantity
+                        * reference.unit_price
+                        * (1 - reference.discount_pct),
+                        2
+                    )
+                ) <= 0.01
+          );
+        """
+    )
 
     with engine.connect() as connection:
-        total_records = connection.execute(total_query).scalar_one()
-        evaluated_records = connection.execute(evaluated_query).scalar_one()
-        failed_records = connection.execute(failure_query).scalar_one()
+        total_records = connection.execute(
+            total_query
+        ).scalar_one()
 
-    return build_rule_result(
-    table_name=table_name,
-    rule=rule,
-    total_records=total_records,
-    failed_records=failed_records,
-    evaluated_records=evaluated_records
-)
+        evaluated_records = connection.execute(
+            evaluated_query
+        ).scalar_one()
+
+        failed_records = connection.execute(
+            failure_query
+        ).scalar_one()
+
+        failed_identifiers = connection.execute(
+            failed_identifiers_query
+        ).scalars().all()
+
+    result = build_rule_result(
+        table_name=table_name,
+        rule=rule,
+        total_records=total_records,
+        failed_records=failed_records,
+        evaluated_records=evaluated_records
+    )
+
+    result["failed_record_identifiers"] = [
+        str(identifier) if identifier is not None else None
+        for identifier in failed_identifiers
+    ]
+
+    return result
 
 def execute_return_window_check_rule(table_name, rule):
     """Validate that a return occurs within the allowed return window."""
@@ -1209,24 +1736,26 @@ def execute_return_window_check_rule(table_name, rule):
     join_column = rule["join_column"]
     reference_table = rule["reference_table"]
     max_days = rule["max_days"]
+    primary_key = PRIMARY_KEY_MAP[table_name]
 
     total_query = text(
         f"SELECT COUNT(*) FROM raw.{table_name};"
     )
+
     evaluated_query = text(
-    f"""
-    SELECT COUNT(*)
-    FROM raw.{table_name} AS source
-    WHERE source.{join_column} IS NOT NULL
-      AND source.return_date IS NOT NULL
-      AND EXISTS (
-          SELECT 1
-          FROM raw.{reference_table} AS reference
-          WHERE reference.{join_column} = source.{join_column}
-            AND reference.order_date IS NOT NULL
-      );
-    """
-)
+        f"""
+        SELECT COUNT(*)
+        FROM raw.{table_name} AS source
+        WHERE source.{join_column} IS NOT NULL
+          AND source.return_date IS NOT NULL
+          AND EXISTS (
+              SELECT 1
+              FROM raw.{reference_table} AS reference
+              WHERE reference.{join_column} = source.{join_column}
+                AND reference.order_date IS NOT NULL
+          );
+        """
+    )
 
     failure_query = text(
         f"""
@@ -1234,14 +1763,12 @@ def execute_return_window_check_rule(table_name, rule):
         FROM raw.{table_name} AS source
         WHERE source.{join_column} IS NOT NULL
           AND source.return_date IS NOT NULL
-
           AND EXISTS (
               SELECT 1
               FROM raw.{reference_table} AS reference
               WHERE reference.{join_column} = source.{join_column}
                 AND reference.order_date IS NOT NULL
           )
-
           AND NOT EXISTS (
               SELECT 1
               FROM raw.{reference_table} AS reference
@@ -1254,54 +1781,101 @@ def execute_return_window_check_rule(table_name, rule):
         """
     )
 
+    failed_identifiers_query = text(
+        f"""
+        SELECT source.{primary_key}
+        FROM raw.{table_name} AS source
+        WHERE source.{join_column} IS NOT NULL
+          AND source.return_date IS NOT NULL
+          AND EXISTS (
+              SELECT 1
+              FROM raw.{reference_table} AS reference
+              WHERE reference.{join_column} = source.{join_column}
+                AND reference.order_date IS NOT NULL
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM raw.{reference_table} AS reference
+              WHERE reference.{join_column} = source.{join_column}
+                AND reference.order_date IS NOT NULL
+                AND source.return_date >= reference.order_date
+                AND source.return_date <=
+                    reference.order_date + :max_days
+          );
+        """
+    )
+
+    parameters = {
+        "max_days": max_days
+    }
+
     with engine.connect() as connection:
-     total_records = connection.execute(total_query).scalar_one()
-     evaluated_records = connection.execute(evaluated_query).scalar_one()
+        total_records = connection.execute(
+            total_query
+        ).scalar_one()
 
-     failed_records = connection.execute(
-        failure_query,
-        {"max_days": max_days}
-     ).scalar_one()
+        evaluated_records = connection.execute(
+            evaluated_query
+        ).scalar_one()
 
-    return build_rule_result(
-    table_name=table_name,
-    rule=rule,
-    total_records=total_records,
-    failed_records=failed_records,
-    evaluated_records=evaluated_records
-)
+        failed_records = connection.execute(
+            failure_query,
+            parameters
+        ).scalar_one()
+
+        failed_identifiers = connection.execute(
+            failed_identifiers_query,
+            parameters
+        ).scalars().all()
+
+    result = build_rule_result(
+        table_name=table_name,
+        rule=rule,
+        total_records=total_records,
+        failed_records=failed_records,
+        evaluated_records=evaluated_records
+    )
+
+    result["failed_record_identifiers"] = [
+        str(identifier) if identifier is not None else None
+        for identifier in failed_identifiers
+    ]
+
+    return result
 
 def execute_payment_amount_reconciliation_rule(table_name, rule):
     """Validate payment amount against the calculated order total."""
+
+    primary_key = PRIMARY_KEY_MAP[table_name]
 
     total_query = text(
         f"SELECT COUNT(*) FROM raw.{table_name};"
     )
 
     evaluated_query = text(
-    """
-    WITH order_totals AS (
-        SELECT
-            order_id
-        FROM raw.order_items
-        WHERE order_id IS NOT NULL
-          AND quantity IS NOT NULL
-          AND unit_price IS NOT NULL
-          AND discount_pct IS NOT NULL
-        GROUP BY order_id
-    )
+        """
+        WITH order_totals AS (
+            SELECT
+                order_id
+            FROM raw.order_items
+            WHERE order_id IS NOT NULL
+              AND quantity IS NOT NULL
+              AND unit_price IS NOT NULL
+              AND discount_pct IS NOT NULL
+            GROUP BY order_id
+        )
 
-    SELECT COUNT(*)
-    FROM raw.payments AS payment
-    WHERE payment.order_id IS NOT NULL
-      AND payment.payment_amount IS NOT NULL
-      AND EXISTS (
-          SELECT 1
-          FROM order_totals AS totals
-          WHERE totals.order_id = payment.order_id
-      );
-    """
-)
+        SELECT COUNT(*)
+        FROM raw.payments AS payment
+        WHERE payment.order_id IS NOT NULL
+          AND payment.payment_amount IS NOT NULL
+          AND EXISTS (
+              SELECT 1
+              FROM order_totals AS totals
+              WHERE totals.order_id = payment.order_id
+          );
+        """
+    )
 
     failure_query = text(
         """
@@ -1328,13 +1902,53 @@ def execute_payment_amount_reconciliation_rule(table_name, rule):
         FROM raw.payments AS payment
         WHERE payment.order_id IS NOT NULL
           AND payment.payment_amount IS NOT NULL
-
           AND EXISTS (
               SELECT 1
               FROM order_totals AS totals
               WHERE totals.order_id = payment.order_id
           )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM order_totals AS totals
+              WHERE totals.order_id = payment.order_id
+                AND ABS(
+                    payment.payment_amount
+                    - totals.expected_payment_amount
+                ) <= 0.01
+          );
+        """
+    )
 
+    failed_identifiers_query = text(
+        f"""
+        WITH order_totals AS (
+            SELECT
+                order_id,
+                ROUND(
+                    SUM(
+                        quantity
+                        * unit_price
+                        * (1 - discount_pct)
+                    ),
+                    2
+                ) AS expected_payment_amount
+            FROM raw.order_items
+            WHERE order_id IS NOT NULL
+              AND quantity IS NOT NULL
+              AND unit_price IS NOT NULL
+              AND discount_pct IS NOT NULL
+            GROUP BY order_id
+        )
+
+        SELECT payment.{primary_key}
+        FROM raw.payments AS payment
+        WHERE payment.order_id IS NOT NULL
+          AND payment.payment_amount IS NOT NULL
+          AND EXISTS (
+              SELECT 1
+              FROM order_totals AS totals
+              WHERE totals.order_id = payment.order_id
+          )
           AND NOT EXISTS (
               SELECT 1
               FROM order_totals AS totals
@@ -1348,99 +1962,154 @@ def execute_payment_amount_reconciliation_rule(table_name, rule):
     )
 
     with engine.connect() as connection:
-        total_records = connection.execute(total_query).scalar_one()
-        evaluated_records = connection.execute(evaluated_query).scalar_one()
-        failed_records = connection.execute(failure_query).scalar_one()
+        total_records = connection.execute(
+            total_query
+        ).scalar_one()
 
-    return build_rule_result(
-    table_name=table_name,
-    rule=rule,
-    total_records=total_records,
-    failed_records=failed_records,
-    evaluated_records=evaluated_records
-)
+        evaluated_records = connection.execute(
+            evaluated_query
+        ).scalar_one()
+
+        failed_records = connection.execute(
+            failure_query
+        ).scalar_one()
+
+        failed_identifiers = connection.execute(
+            failed_identifiers_query
+        ).scalars().all()
+
+    result = build_rule_result(
+        table_name=table_name,
+        rule=rule,
+        total_records=total_records,
+        failed_records=failed_records,
+        evaluated_records=evaluated_records
+    )
+
+    result["failed_record_identifiers"] = [
+        str(identifier) if identifier is not None else None
+        for identifier in failed_identifiers
+    ]
+
+    return result
 
 def execute_category_subcategory_match_rule(table_name, rule):
     """Validate that each product category-subcategory pair is allowed."""
 
+    primary_key = PRIMARY_KEY_MAP[table_name]
+
     total_query = text(
         f"SELECT COUNT(*) FROM raw.{table_name};"
     )
+
     evaluated_query = text(
-    f"""
-    SELECT COUNT(*)
-    FROM raw.{table_name}
-    WHERE category IS NOT NULL
-      AND subcategory IS NOT NULL;
-    """
+        f"""
+        SELECT COUNT(*)
+        FROM raw.{table_name}
+        WHERE category IS NOT NULL
+          AND subcategory IS NOT NULL;
+        """
     )
+
+    failure_condition = """
+        category IS NOT NULL
+        AND subcategory IS NOT NULL
+        AND NOT (
+              (category = 'Clothing'
+                  AND subcategory IN (
+                      'Accessories',
+                      'Activewear',
+                      'Footwear',
+                      'Men''s Clothing',
+                      'Women''s Clothing'
+                  ))
+
+           OR (category = 'Electronics'
+                  AND subcategory IN (
+                      'Headphones',
+                      'Laptops',
+                      'Monitors',
+                      'Smartphones',
+                      'Tablets'
+                  ))
+
+           OR (category = 'Home & Kitchen'
+                  AND subcategory IN (
+                      'Cookware',
+                      'Furniture',
+                      'Home Decor',
+                      'Kitchen Appliances',
+                      'Storage'
+                  ))
+
+           OR (category = 'Office Supplies'
+                  AND subcategory IN (
+                      'Desk Accessories',
+                      'Office Furniture',
+                      'Paper',
+                      'Printers',
+                      'Writing Supplies'
+                  ))
+
+           OR (category = 'Sports & Outdoors'
+                  AND subcategory IN (
+                      'Camping',
+                      'Cycling',
+                      'Fitness Equipment',
+                      'Outdoor Gear',
+                      'Sports Accessories'
+                  ))
+        )
+    """
 
     failure_query = text(
-    f"""
-    SELECT COUNT(*)
-    FROM raw.{table_name}
-    WHERE category IS NOT NULL
-      AND subcategory IS NOT NULL
-      AND NOT (
-            (category = 'Clothing'
-                AND subcategory IN (
-                    'Accessories',
-                    'Activewear',
-                    'Footwear',
-                    'Men''s Clothing',
-                    'Women''s Clothing'
-                ))
-
-         OR (category = 'Electronics'
-                AND subcategory IN (
-                    'Headphones',
-                    'Laptops',
-                    'Monitors',
-                    'Smartphones',
-                    'Tablets'
-                ))
-
-         OR (category = 'Home & Kitchen'
-                AND subcategory IN (
-                    'Cookware',
-                    'Furniture',
-                    'Home Decor',
-                    'Kitchen Appliances',
-                    'Storage'
-                ))
-
-         OR (category = 'Office Supplies'
-                AND subcategory IN (
-                    'Desk Accessories',
-                    'Office Furniture',
-                    'Paper',
-                    'Printers',
-                    'Writing Supplies'
-                ))
-
-         OR (category = 'Sports & Outdoors'
-                AND subcategory IN (
-                    'Camping',
-                    'Cycling',
-                    'Fitness Equipment',
-                    'Outdoor Gear',
-                    'Sports Accessories'
-                ))
-      );
-    """
-)
-    with engine.connect() as connection:
-        total_records = connection.execute(total_query).scalar_one()
-        evaluated_records = connection.execute(evaluated_query).scalar_one()
-        failed_records = connection.execute(failure_query).scalar_one()
-
-    return build_rule_result(
-    table_name=table_name,
-    rule=rule,
-    total_records=total_records,
-    failed_records=failed_records,
-    evaluated_records=evaluated_records
+        f"""
+        SELECT COUNT(*)
+        FROM raw.{table_name}
+        WHERE {failure_condition};
+        """
     )
+
+    failed_identifiers_query = text(
+        f"""
+        SELECT {primary_key}
+        FROM raw.{table_name}
+        WHERE {failure_condition};
+        """
+    )
+
+    with engine.connect() as connection:
+        total_records = connection.execute(
+            total_query
+        ).scalar_one()
+
+        evaluated_records = connection.execute(
+            evaluated_query
+        ).scalar_one()
+
+        failed_records = connection.execute(
+            failure_query
+        ).scalar_one()
+
+        failed_identifiers = connection.execute(
+            failed_identifiers_query
+        ).scalars().all()
+
+    result = build_rule_result(
+        table_name=table_name,
+        rule=rule,
+        total_records=total_records,
+        failed_records=failed_records,
+        evaluated_records=evaluated_records
+    )
+
+    result["failed_record_identifiers"] = [
+        str(identifier) if identifier is not None else None
+        for identifier in failed_identifiers
+    ]
+
+    return result
+
 
 def execute_rule(table_name, rule):
     """Route a quality rule to the correct executor."""
@@ -1534,6 +2203,9 @@ if __name__ == "__main__":
 
         # Save rule-level results to PostgreSQL.
         save_rule_results(run_id, results)
+
+        # Save issue-level details for rules that capture failed records.
+        save_issue_details(run_id, results)
 
         # Calculate quality scores.
         table_scores = calculate_table_scores(results)

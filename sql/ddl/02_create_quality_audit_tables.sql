@@ -77,3 +77,27 @@ ON quality.table_scores(run_id);
 
 CREATE INDEX IF NOT EXISTS idx_dimension_scores_run_id
 ON quality.dimension_scores(run_id);
+
+CREATE TABLE IF NOT EXISTS quality.issue_details (
+    issue_id BIGSERIAL PRIMARY KEY,
+    run_id BIGINT NOT NULL,
+    rule_id VARCHAR(50) NOT NULL,
+    table_name VARCHAR(100) NOT NULL,
+    record_identifier VARCHAR(255),
+    issue_description TEXT NOT NULL,
+    detected_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_issue_details_run
+        FOREIGN KEY (run_id)
+        REFERENCES quality.audit_runs(run_id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_issue_details_run_id
+ON quality.issue_details(run_id);
+
+CREATE INDEX IF NOT EXISTS idx_issue_details_rule_id
+ON quality.issue_details(rule_id);
+
+CREATE INDEX IF NOT EXISTS idx_issue_details_table_name
+ON quality.issue_details(table_name);
