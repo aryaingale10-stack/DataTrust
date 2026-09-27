@@ -40,7 +40,7 @@ DEPENDENCY_SQL_PATH = (
     / "01_enforce_clean_dependencies.sql"
 )
 
-def enforce_clean_dependencies():
+def enforce_clean_dependencies(run_id):
     """Remove records from the clean layer that have invalid dependencies."""
 
     sql_script = DEPENDENCY_SQL_PATH.read_text()
@@ -49,7 +49,10 @@ def enforce_clean_dependencies():
 
     try:
         cursor = raw_connection.cursor()
-        cursor.execute(sql_script)
+        cursor.execute(
+          sql_script,
+          {"run_id": run_id}
+)
         raw_connection.commit()
         cursor.close()
 
@@ -60,25 +63,6 @@ def enforce_clean_dependencies():
     finally:
         raw_connection.close()
 
-def enforce_clean_dependencies():
-    """Remove records from the clean layer that have invalid dependencies."""
-
-    sql_script = DEPENDENCY_SQL_PATH.read_text()
-
-    raw_connection = engine.raw_connection()
-
-    try:
-        cursor = raw_connection.cursor()
-        cursor.execute(sql_script)
-        raw_connection.commit()
-        cursor.close()
-
-    except Exception:
-        raw_connection.rollback()
-        raise
-
-    finally:
-        raw_connection.close()   
 
 def run_quality_audit():
     """Run the full data quality audit and return the audit run ID."""
@@ -138,12 +122,12 @@ def build_clean_and_quarantine_layers(run_id):
 
     return quarantine_counts, clean_counts
 
-def run_dependency_cleanup():
+def run_dependency_cleanup(run_id):
     """Enforce dependency integrity across the clean data layer."""
 
     print("\n[4/5] Enforcing clean-layer dependencies...")
 
-    enforce_clean_dependencies()
+    enforce_clean_dependencies(run_id)
 
     print("Dependency cleanup completed.")
 
@@ -179,7 +163,7 @@ def run_pipeline():
     build_clean_and_quarantine_layers(run_id)
 
     # Stage 4: Remove dependency-propagated invalid records.
-    run_dependency_cleanup()
+    run_dependency_cleanup(run_id)
 
     # Stage 5: Validate the final clean layer.
     validation_results, clean_summary = run_clean_validation()
