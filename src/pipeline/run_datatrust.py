@@ -39,6 +39,10 @@ from src.anomaly.anomaly_detector import (
     save_anomaly_results,
 )
 
+from src.root_cause.root_cause_analyzer import (
+    run_root_cause_analysis,
+)
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 DEPENDENCY_SQL_PATH = (
@@ -78,7 +82,7 @@ def run_quality_audit():
     quality_rules = load_quality_rules()
     rules_configured = count_quality_rules(quality_rules)
 
-    print("\n[1/7] Running data quality audit...")
+    print("\n[1/8] Running data quality audit...")
     print(f"Configured rules: {rules_configured}")
 
     run_id = create_audit_run(rules_configured)
@@ -116,13 +120,13 @@ def run_quality_audit():
 def build_clean_and_quarantine_layers(run_id):
     """Build quarantine and first-pass clean layers for an audit run."""
 
-    print("\n[2/7] Saving flagged records to quarantine...")
+    print("\n[2/8] Saving flagged records to quarantine...")
 
     quarantine_counts = save_all_flagged_records(run_id)
 
     print("Quarantine layer completed.")
 
-    print("\n[3/7] Loading trusted records into clean layer...")
+    print("\n[3/8] Loading trusted records into clean layer...")
 
     clean_counts = save_all_trusted_records(run_id)
 
@@ -133,7 +137,7 @@ def build_clean_and_quarantine_layers(run_id):
 def run_dependency_cleanup(run_id):
     """Enforce dependency integrity across the clean data layer."""
 
-    print("\n[4/7] Enforcing clean-layer dependencies...")
+    print("\n[4/8] Enforcing clean-layer dependencies...")
 
     enforce_clean_dependencies(run_id)
 
@@ -142,7 +146,7 @@ def run_dependency_cleanup(run_id):
 def run_clean_validation():
     """Validate the final clean layer and return validation results."""
 
-    print("\n[5/7] Validating final clean layer...")
+    print("\n[5/8] Validating final clean layer...")
 
     validation_results = validate_clean_layer()
     clean_summary = get_clean_layer_summary()
@@ -161,7 +165,7 @@ def run_reconciliation(run_id):
     """Validate that all raw records are accounted for."""
 
     
-    print("\n[6/7] Reconciling source-to-final record counts...")
+    print("\n[6/8] Reconciling source-to-final record counts...")
     result = validate_reconciliation(run_id)
     print_reconciliation_report(run_id)
 
@@ -192,7 +196,7 @@ def run_pipeline():
     reconciliation_result = run_reconciliation(run_id)
 
     # Stage 7: Run business anomaly detection.
-    print("\n[7/7] Running business anomaly detection...")
+    print("\n[7/8] Running business anomaly detection...")
 
     anomaly_results = run_complete_anomaly_detection()
 
@@ -209,6 +213,27 @@ def run_pipeline():
     print(f"Anomaly rows saved:          {anomaly_rows_saved:,}")
     print("Anomaly detection completed.")
 
+    print("\n[8/8] Running anomaly root-cause analysis...")
+
+    root_cause_results, root_cause_rows_saved = (
+    run_root_cause_analysis()
+)
+
+    print(
+    f"Root-cause rows generated: "
+    f"{len(root_cause_results):,}"
+)
+    print(
+    f"Root-cause rows saved:     "
+    f"{root_cause_rows_saved:,}"
+)
+
+    if len(root_cause_results) != root_cause_rows_saved:
+     raise ValueError(
+        "Root-cause persistence validation failed."
+    )
+
+    print("Root-cause analysis completed.")
     print("\n" + "=" * 70)
     print("PIPELINE COMPLETED SUCCESSFULLY")
     print("=" * 70)
@@ -222,6 +247,8 @@ def run_pipeline():
         "reconciliation_result": reconciliation_result,
         "anomaly_results": anomaly_results,
         "anomaly_rows_saved": anomaly_rows_saved,
+        "root_cause_results": root_cause_results,
+        "root_cause_rows_saved": root_cause_rows_saved,
     }
 
 if __name__ == "__main__":
