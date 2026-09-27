@@ -29,6 +29,10 @@ from src.quality.clean_validator import (
     get_clean_layer_summary,
     validate_clean_layer,
 )
+from src.quality.reconciliation import (
+    print_reconciliation_report,
+    validate_reconciliation,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -70,7 +74,7 @@ def run_quality_audit():
     quality_rules = load_quality_rules()
     rules_configured = count_quality_rules(quality_rules)
 
-    print("\n[1/5] Running data quality audit...")
+    print("\n[1/6] Running data quality audit...")
     print(f"Configured rules: {rules_configured}")
 
     run_id = create_audit_run(rules_configured)
@@ -108,13 +112,13 @@ def run_quality_audit():
 def build_clean_and_quarantine_layers(run_id):
     """Build quarantine and first-pass clean layers for an audit run."""
 
-    print("\n[2/5] Saving flagged records to quarantine...")
+    print("\n[2/6] Saving flagged records to quarantine...")
 
     quarantine_counts = save_all_flagged_records(run_id)
 
     print("Quarantine layer completed.")
 
-    print("\n[3/5] Loading trusted records into clean layer...")
+    print("\n[3/6] Loading trusted records into clean layer...")
 
     clean_counts = save_all_trusted_records(run_id)
 
@@ -125,7 +129,7 @@ def build_clean_and_quarantine_layers(run_id):
 def run_dependency_cleanup(run_id):
     """Enforce dependency integrity across the clean data layer."""
 
-    print("\n[4/5] Enforcing clean-layer dependencies...")
+    print("\n[4/6] Enforcing clean-layer dependencies...")
 
     enforce_clean_dependencies(run_id)
 
@@ -134,7 +138,7 @@ def run_dependency_cleanup(run_id):
 def run_clean_validation():
     """Validate the final clean layer and return validation results."""
 
-    print("\n[5/5] Validating final clean layer...")
+    print("\n[5/6] Validating final clean layer...")
 
     validation_results = validate_clean_layer()
     clean_summary = get_clean_layer_summary()
@@ -148,6 +152,18 @@ def run_clean_validation():
     print("Clean-layer validation passed.")
 
     return validation_results, clean_summary
+
+def run_reconciliation(run_id):
+    """Validate that all raw records are accounted for."""
+
+    print("\n[6/6] Reconciling source-to-final record counts...")
+
+    result = validate_reconciliation(run_id)
+    print_reconciliation_report(run_id)
+
+    print("Data reconciliation passed.")
+
+    return result
 
 def run_pipeline():
     """Run the complete DataTrust data quality pipeline."""
@@ -167,6 +183,7 @@ def run_pipeline():
 
     # Stage 5: Validate the final clean layer.
     validation_results, clean_summary = run_clean_validation()
+    reconciliation_result = run_reconciliation(run_id)
 
     print("\n" + "=" * 70)
     print("PIPELINE COMPLETED SUCCESSFULLY")
@@ -175,10 +192,11 @@ def run_pipeline():
     print(f"Audit Run ID: {run_id}")
 
     return {
-        "run_id": run_id,
-        "validation_results": validation_results,
-        "clean_summary": clean_summary,
-    }
+    "run_id": run_id,
+    "validation_results": validation_results,
+    "clean_summary": clean_summary,
+    "reconciliation_result": reconciliation_result,
+}
 
 
 if __name__ == "__main__":
