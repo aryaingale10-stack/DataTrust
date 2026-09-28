@@ -59,6 +59,19 @@ DEPENDENCY_SQL_PATH = (
     / "transformations"
     / "01_enforce_clean_dependencies.sql"
 )
+STAR_SCHEMA_SQL_PATH = (
+    PROJECT_ROOT
+    / "sql"
+    / "transformations"
+    / "02_build_analytics_star_schema.sql"
+)
+
+POWERBI_VIEWS_SQL_PATH = (
+    PROJECT_ROOT
+    / "sql"
+    / "transformations"
+    / "03_create_powerbi_views.sql"
+)
 
 def enforce_clean_dependencies(run_id):
     """Remove records from the clean layer that have invalid dependencies."""
@@ -83,6 +96,26 @@ def enforce_clean_dependencies(run_id):
     finally:
         raw_connection.close()
 
+def execute_sql_script(sql_path):
+    """Execute a PostgreSQL SQL script as a single transaction."""
+
+    sql_script = sql_path.read_text()
+
+    raw_connection = engine.raw_connection()
+
+    try:
+        cursor = raw_connection.cursor()
+        cursor.execute(sql_script)
+        raw_connection.commit()
+        cursor.close()
+
+    except Exception:
+        raw_connection.rollback()
+        raise
+
+    finally:
+        raw_connection.close()
+
 
 def run_quality_audit():
     """Run the full data quality audit and return the audit run ID."""
@@ -90,7 +123,7 @@ def run_quality_audit():
     quality_rules = load_quality_rules()
     rules_configured = count_quality_rules(quality_rules)
 
-    print("\n[1/10] Running data quality audit...")
+    print("\n[1/12] Running data quality audit...")
     print(f"Configured rules: {rules_configured}")
 
     run_id = create_audit_run(rules_configured)
@@ -128,13 +161,13 @@ def run_quality_audit():
 def build_clean_and_quarantine_layers(run_id):
     """Build quarantine and first-pass clean layers for an audit run."""
 
-    print("\n[2/10] Saving flagged records to quarantine...")
+    print("\n[2/12] Saving flagged records to quarantine...")
 
     quarantine_counts = save_all_flagged_records(run_id)
 
     print("Quarantine layer completed.")
 
-    print("\n[3/10] Loading trusted records into clean layer...")
+    print("\n[3/12] Loading trusted records into clean layer...")
 
     clean_counts = save_all_trusted_records(run_id)
 
@@ -145,7 +178,7 @@ def build_clean_and_quarantine_layers(run_id):
 def run_dependency_cleanup(run_id):
     """Enforce dependency integrity across the clean data layer."""
 
-    print("\n[4/10] Enforcing clean-layer dependencies...")
+    print("\n[4/12] Enforcing clean-layer dependencies...")
 
     enforce_clean_dependencies(run_id)
 
@@ -154,7 +187,7 @@ def run_dependency_cleanup(run_id):
 def run_clean_validation():
     """Validate the final clean layer and return validation results."""
 
-    print("\n[5/10] Validating final clean layer...")
+    print("\n[5/12] Validating final clean layer...")
 
     validation_results = validate_clean_layer()
     clean_summary = get_clean_layer_summary()
@@ -173,7 +206,7 @@ def run_reconciliation(run_id):
     """Validate that all raw records are accounted for."""
 
     
-    print("\n[6/10] Reconciling source-to-final record counts...")
+    print("\n[6/12] Reconciling source-to-final record counts...")
     result = validate_reconciliation(run_id)
     print_reconciliation_report(run_id)
 
@@ -204,7 +237,7 @@ def run_pipeline():
     reconciliation_result = run_reconciliation(run_id)
 
     # Stage 7: Run business anomaly detection.
-    print("\n[7/10] Running business anomaly detection...")
+    print("\n[7/12] Running business anomaly detection...")
 
     anomaly_results = run_complete_anomaly_detection()
 
@@ -221,7 +254,7 @@ def run_pipeline():
     print(f"Anomaly rows saved:          {anomaly_rows_saved:,}")
     print("Anomaly detection completed.")
 
-    print("\n[8/10] Running anomaly root-cause analysis...")
+    print("\n[8/12] Running anomaly root-cause analysis...")
 
     root_cause_results, root_cause_rows_saved = (
     run_root_cause_analysis()
@@ -243,63 +276,79 @@ def run_pipeline():
 
     print("Root-cause analysis completed.")
     print("\n" + "=" * 70)
-    print("\n[9/10] Running business impact analysis...")
+    print("\n[9/12] Running business impact analysis...")
 
     impact_results, impact_rows_saved, impact_summary = (
-    run_and_save_business_impact_analysis()
-)
-
-    print(
-    f"Business impact rows generated: "
-    f"{len(impact_results):,}"
-)
-
-    print(
-    f"Business impact rows saved:     "
-    f"{impact_rows_saved:,}"
-)
-
-    if len(impact_results) != impact_rows_saved:
-     raise ValueError(
-        "Business impact persistence validation failed."
+        run_and_save_business_impact_analysis()
     )
 
     print(
-      f"Absolute revenue deviation:     "
-      f"${impact_summary['absolute_revenue_deviation']:,.2f}"
-)
+        f"Business impact rows generated: "
+        f"{len(impact_results):,}"
+    )
+
+    print(
+        f"Business impact rows saved:     "
+        f"{impact_rows_saved:,}"
+    )
+
+    if len(impact_results) != impact_rows_saved:
+        raise ValueError(
+            "Business impact persistence validation failed."
+        )
+
+    print(
+        f"Absolute revenue deviation:     "
+        f"${impact_summary['absolute_revenue_deviation']:,.2f}"
+    )
 
     print("Business impact analysis completed.")
 
-    print("\n[10/10] Running KPI metric reliability analysis...")
+    print("\n[10/12] Running KPI metric reliability analysis...")
 
     (
         reliability_dependencies,
         reliability_results,
         reliability_rows_saved,
-        ) = run_and_save_metric_reliability_analysis()
+    ) = run_and_save_metric_reliability_analysis()
 
     print(
         f"KPI dependency rows analyzed: "
         f"{len(reliability_dependencies):,}"
-        )
+    )
 
     print(
         f"KPI reliability scores generated: "
         f"{len(reliability_results):,}"
-        )
+    )
 
     print(
         f"KPI reliability rows saved: "
         f"{reliability_rows_saved:,}"
-        )
+    )
 
     if len(reliability_results) != reliability_rows_saved:
         raise ValueError(
             "Metric reliability persistence validation failed."
         )
 
-        print("KPI metric reliability analysis completed.")
+    print("KPI metric reliability analysis completed.")
+
+    # Stage 11: Build analytics star schema and KPI views.
+    print("\n[11/12] Building analytics star schema...")
+
+    execute_sql_script(STAR_SCHEMA_SQL_PATH)
+
+    print("Analytics star schema built successfully.")
+
+    # Stage 12: Build Power BI reporting views.
+    print("\n[12/12] Building Power BI reporting views...")
+
+    execute_sql_script(POWERBI_VIEWS_SQL_PATH)
+
+    print("Power BI reporting views built successfully.")
+
+    print("\n" + "=" * 70)
     print("PIPELINE COMPLETED SUCCESSFULLY")
     print("=" * 70)
 
