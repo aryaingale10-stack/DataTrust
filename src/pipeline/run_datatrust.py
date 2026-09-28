@@ -51,6 +51,10 @@ from src.reliability.metric_reliability import (
     run_and_save_metric_reliability_analysis,
 )
 
+from src.reporting.export_dashboard_data import (
+    export_dashboard_data,
+)
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 DEPENDENCY_SQL_PATH = (
@@ -123,7 +127,7 @@ def run_quality_audit():
     quality_rules = load_quality_rules()
     rules_configured = count_quality_rules(quality_rules)
 
-    print("\n[1/12] Running data quality audit...")
+    print("\n[1/13] Running data quality audit...")
     print(f"Configured rules: {rules_configured}")
 
     run_id = create_audit_run(rules_configured)
@@ -161,13 +165,13 @@ def run_quality_audit():
 def build_clean_and_quarantine_layers(run_id):
     """Build quarantine and first-pass clean layers for an audit run."""
 
-    print("\n[2/12] Saving flagged records to quarantine...")
+    print("\n[2/13] Saving flagged records to quarantine...")
 
     quarantine_counts = save_all_flagged_records(run_id)
 
     print("Quarantine layer completed.")
 
-    print("\n[3/12] Loading trusted records into clean layer...")
+    print("\n[3/13] Loading trusted records into clean layer...")
 
     clean_counts = save_all_trusted_records(run_id)
 
@@ -178,7 +182,7 @@ def build_clean_and_quarantine_layers(run_id):
 def run_dependency_cleanup(run_id):
     """Enforce dependency integrity across the clean data layer."""
 
-    print("\n[4/12] Enforcing clean-layer dependencies...")
+    print("\n[4/13] Enforcing clean-layer dependencies...")
 
     enforce_clean_dependencies(run_id)
 
@@ -187,7 +191,7 @@ def run_dependency_cleanup(run_id):
 def run_clean_validation():
     """Validate the final clean layer and return validation results."""
 
-    print("\n[5/12] Validating final clean layer...")
+    print("\n[5/13] Validating final clean layer...")
 
     validation_results = validate_clean_layer()
     clean_summary = get_clean_layer_summary()
@@ -206,7 +210,7 @@ def run_reconciliation(run_id):
     """Validate that all raw records are accounted for."""
 
     
-    print("\n[6/12] Reconciling source-to-final record counts...")
+    print("\n[6/13] Reconciling source-to-final record counts...")
     result = validate_reconciliation(run_id)
     print_reconciliation_report(run_id)
 
@@ -237,7 +241,7 @@ def run_pipeline():
     reconciliation_result = run_reconciliation(run_id)
 
     # Stage 7: Run business anomaly detection.
-    print("\n[7/12] Running business anomaly detection...")
+    print("\n[7/13] Running business anomaly detection...")
 
     anomaly_results = run_complete_anomaly_detection()
 
@@ -254,7 +258,7 @@ def run_pipeline():
     print(f"Anomaly rows saved:          {anomaly_rows_saved:,}")
     print("Anomaly detection completed.")
 
-    print("\n[8/12] Running anomaly root-cause analysis...")
+    print("\n[8/13] Running anomaly root-cause analysis...")
 
     root_cause_results, root_cause_rows_saved = (
     run_root_cause_analysis()
@@ -276,7 +280,7 @@ def run_pipeline():
 
     print("Root-cause analysis completed.")
     print("\n" + "=" * 70)
-    print("\n[9/12] Running business impact analysis...")
+    print("\n[9/13] Running business impact analysis...")
 
     impact_results, impact_rows_saved, impact_summary = (
         run_and_save_business_impact_analysis()
@@ -304,7 +308,7 @@ def run_pipeline():
 
     print("Business impact analysis completed.")
 
-    print("\n[10/12] Running KPI metric reliability analysis...")
+    print("\n[10/13] Running KPI metric reliability analysis...")
 
     (
         reliability_dependencies,
@@ -335,18 +339,33 @@ def run_pipeline():
     print("KPI metric reliability analysis completed.")
 
     # Stage 11: Build analytics star schema and KPI views.
-    print("\n[11/12] Building analytics star schema...")
+    print("\n[11/13] Building analytics star schema...")
 
     execute_sql_script(STAR_SCHEMA_SQL_PATH)
 
     print("Analytics star schema built successfully.")
 
     # Stage 12: Build Power BI reporting views.
-    print("\n[12/12] Building Power BI reporting views...")
+    print("\n[12/13] Building Power BI reporting views...")
 
     execute_sql_script(POWERBI_VIEWS_SQL_PATH)
 
     print("Power BI reporting views built successfully.")
+    # Stage 13: Export dashboard-ready datasets.
+    print("\n[13/13] Exporting dashboard-ready datasets...")
+
+    exported_files = export_dashboard_data()
+
+    if len(exported_files) != 14:
+        raise ValueError(
+            "Dashboard export validation failed. "
+            f"Expected 14 files, exported {len(exported_files)}."
+        )
+
+    print(
+        f"Dashboard datasets exported successfully: "
+        f"{len(exported_files)} files"
+    )
 
     print("\n" + "=" * 70)
     print("PIPELINE COMPLETED SUCCESSFULLY")
