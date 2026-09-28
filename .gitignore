@@ -48,3 +48,5 @@ logs/
 # Generated incoming datasets
 data/incoming/*
 !data/incoming/.gitkeep
+# Generated dashboard datasets
+data/dashboard_exports/*.csv
