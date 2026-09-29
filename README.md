@@ -8,7 +8,22 @@ The project simulates an omnichannel retailer operating across website, mobile a
 
 Unlike a traditional dashboard project that assumes the underlying data is trustworthy, DataTrust evaluates the reliability of the data and the KPIs built from it. The platform combines configurable data-quality rules, automated cleaning and quarantine, source-to-warehouse reconciliation, statistical anomaly detection, root-cause diagnostics, business-impact analysis, and KPI-level reliability scoring.
 
-The complete workflow is orchestrated through a **13-stage automated pipeline**, producing a PostgreSQL analytics warehouse and **14 dashboard-ready reporting datasets** for downstream BI analysis.
+## Table of Contents
+
+- [Project Objectives](#project-objectives)
+- [Technology Stack](#technology-stack)
+- [Project Status](#project-status)
+- [Verified Project Results](#verified-project-results)
+- [End-to-End Pipeline](#end-to-end-pipeline)
+- [Data Quality Framework](#data-quality-framework)
+- [KPI Reliability Layer](#kpi-reliability-layer)
+- [Analytics Data Model](#analytics-data-model)
+- [Advanced SQL Business Analytics](#advanced-sql-business-analytics)
+- [Anomaly Detection & Root-Cause Analysis](#anomaly-detection--root-cause-analysis)
+- [Dashboard & Reporting Layer](#dashboard--reporting-layer)
+- [Automated Testing & Validation](#automated-testing--validation)
+- [Project Structure](#project-structure)
+- [Installation & Setup](#installation--setup)
 
 ## Project Objectives
 
@@ -475,19 +490,3 @@ Current verified result:
 15 passed
 ```
 
-## Table of Contents
-
-- [Project Objectives](#project-objectives)
-- [Technology Stack](#technology-stack)
-- [Project Status](#project-status)
-- [Verified Project Results](#verified-project-results)
-- [End-to-End Pipeline](#end-to-end-pipeline)
-- [Data Quality Framework](#data-quality-framework)
-- [KPI Reliability Layer](#kpi-reliability-layer)
-- [Analytics Data Model](#analytics-data-model)
-- [Advanced SQL Business Analytics](#advanced-sql-business-analytics)
-- [Anomaly Detection & Root-Cause Analysis](#anomaly-detection--root-cause-analysis)
-- [Dashboard & Reporting Layer](#dashboard--reporting-layer)
-- [Automated Testing & Validation](#automated-testing--validation)
-- [Project Structure](#project-structure)
-- [Installation & Setup](#installation--setup)
