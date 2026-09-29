@@ -77,7 +77,9 @@ The end-to-end DataTrust backend currently includes:
 - 14 dashboard-ready CSV exports
 - Automated pytest validation suite
 
-**Next Phase:** Power BI dashboard development and final portfolio presentation.
+**Dashboard Design Status:** Four-page Power BI dashboard specifications are complete, covering Executive Overview, Customer & Product Analytics, Data Trust Center, and Reliability & Incidents.
+
+**Next Phase:** Build the final `.pbix` report in a Windows environment, capture dashboard screenshots, and complete the final portfolio presentation.
 
 ## Verified Project Results
 
