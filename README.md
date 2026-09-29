@@ -472,3 +472,20 @@ Current verified result:
 ```text
 15 passed
 ```
+
+## Table of Contents
+
+- [Project Objectives](#project-objectives)
+- [Technology Stack](#technology-stack)
+- [Project Status](#project-status)
+- [Verified Project Results](#verified-project-results)
+- [End-to-End Pipeline](#end-to-end-pipeline)
+- [Data Quality Framework](#data-quality-framework)
+- [KPI Reliability Layer](#kpi-reliability-layer)
+- [Analytics Data Model](#analytics-data-model)
+- [Advanced SQL Business Analytics](#advanced-sql-business-analytics)
+- [Anomaly Detection & Root-Cause Analysis](#anomaly-detection--root-cause-analysis)
+- [Dashboard & Reporting Layer](#dashboard--reporting-layer)
+- [Automated Testing & Validation](#automated-testing--validation)
+- [Project Structure](#project-structure)
+- [Installation & Setup](#installation--setup)
