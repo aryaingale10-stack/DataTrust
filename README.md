@@ -355,6 +355,7 @@ DataTrust/
 │   ├── reporting/             # Dashboard dataset exports
 │   └── root_cause/            # Root-cause contributor analysis
 ├── tests/                     # Automated pytest suite
+├── .env.example              # Environment variable template
 ├── README.md
 └── requirements.txt
 ```
